@@ -76,3 +76,4 @@ print(example_result)
 # The cumulative-sum column should match cumsum(x).
 stopifnot(all(example_result[, "cumulative_sum"] == cumsum(x)))
 
+# I finished the task
