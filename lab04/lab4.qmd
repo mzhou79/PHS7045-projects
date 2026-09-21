@@ -1,0 +1,315 @@
+---
+title: "Solution for lab4"
+format: html
+editor: visual
+---
+
+## Problem 1
+
+```{r}
+simulate_pi <- function(n = 5e6) {
+  inside <- 0
+  for (i in 1:n) {
+    x <- runif(1, -1, 1)
+    y <- runif(1, -1, 1)
+    if (x^2 + y^2 <= 1) inside <- inside + 1
+  }
+  4 * inside / n
+}
+
+set.seed(1)
+simulate_pi(5e6)
+```
+
+Run the profvis
+
+```{r}
+library(profvis)
+
+profvis({
+  simulate_pi()
+})
+
+
+```
+
+The flame graph shows that `runif()` dominates the execution time. The entire `simulate_pi()` function took 4280 ms, while `runif()`accounted for 4020 ms. Therefore, approximately 4020/4280=93.9% of the total runtime was spent in `runif()`, leaving about 6.1% for everything else in the loop. This occurs because `runif(1, -1, 1)` is called twice per iteration, resulting in 10 million calls when n=5×10\^6.
+
+```{r}
+simulate_pi_vec <- function(n = 5e6) {
+  x <- runif(n, -1, 1)
+  y <- runif(n, -1, 1)
+  
+  inside <- x^2 + y^2 <= 1
+  
+  4 * mean(inside)
+}
+
+bench::mark(
+  loop = simulate_pi(),
+  vectorized = simulate_pi_vec(),
+  relative = TRUE,
+  check = FALSE
+)
+```
+
+Speed up from 4.82s to 617.64ms
+
+## Problem 2
+
+```{r}
+make_kernel <- function(coords, bandwidth) {
+  d <- as.matrix(dist(coords))
+  K <- exp(-(d / bandwidth)^2)
+  K / rowSums(K)
+}
+
+# Advance p0 forward nsteps times: p(s+1) = p(s) %*% K.
+simulate_spread <- function(coords, p0, nsteps = 300, bandwidth = 0.15) {
+  p <- p0
+  for (s in seq_len(nsteps)) {
+    K <- make_kernel(coords, bandwidth)
+    p <- as.vector(p %*% K)
+    p <- p / sum(p)
+  }
+  p
+}
+
+set.seed(2)
+k <- 1000
+coords <- cbind(runif(k), runif(k))
+p0 <- rep(1 / k, k)
+
+p_final <- simulate_spread(coords, p0)
+summary(p_final)
+
+```
+
+use profvis
+
+```{r}
+
+profvis({
+  result_old <- simulate_spread(coords, p0)
+})
+
+
+# Run the original version and time it
+time_old <- system.time({
+  result_old <- simulate_spread(coords, p0)
+})
+
+time_old
+
+```
+
+A large amount of time is in make_kernel(coords, bandwidth), especially in the as.matrix part, because The reason is that the same 1000 × 1000 matrix is rebuilt 300 times.
+
+fix it
+
+```{r}
+simulate_spread_fixed <- function(coords, p0,
+                                  nsteps = 300,
+                                  bandwidth = 0.15) {
+  
+  # K does not depend on s, so calculate it only once
+  K <- make_kernel(coords, bandwidth)
+  
+  p <- p0
+  
+  for (s in seq_len(nsteps)) {
+    p <- as.vector(p %*% K)
+    p <- p / sum(p)
+  }
+  
+  p
+}
+```
+
+```{r}
+# Original
+result_old <- simulate_spread(coords, p0)
+
+# Fixed
+result_new <- simulate_spread_fixed(coords, p0)
+
+# Confirm that the results are the same
+all.equal(result_old, result_new)
+```
+
+The result is unchanged. Now benchmark:
+
+```{r}
+library(microbenchmark)
+
+microbenchmark(
+  original = simulate_spread(coords, p0),
+  fixed = simulate_spread_fixed(coords, p0),
+  times = 5
+)
+```
+
+The original function had a median run time of about 6.45 seconds, while the optimized function took about 0.45 seconds. The optimized version is approximately 14.3 times faster. This suggests that about 6.0 seconds
+
+## Problem 3
+
+```{r}
+fit_poisson_nr <- function(X, y, maxit = 50, tol = 1e-8) {
+  beta <- rep(0, ncol(X))
+  beta[1] <- log(mean(y))
+
+  for (it in 1:maxit) {
+    mu <- exp(drop(X %*% beta))
+    score <- crossprod(X, y - mu)
+    info <- crossprod(X * mu, X)
+    step <- solve(info, score)
+
+    beta <- beta - drop(step)
+
+    if (max(abs(step)) < tol) break
+  }
+
+  list(coefficients = beta, iterations = it)
+}
+```
+
+```{r}
+source("/Users/zhoumo/Downloads/poisson-nr.R")
+
+fit_poisson_nr(X, y)
+```
+
+```{r}
+traceback()
+```
+
+source it again after change
+
+```{r}
+source("/Users/zhoumo/Downloads/poisson-nr.R")
+
+fit_poisson_nr(X, y)
+```
+
+I found the beta \<- beta - drop(step) line is problematic. The log likelihood is decreasing each time. We should change into +.
+
+## Problem 4
+
+```{r}
+source("/Users/zhoumo/Downloads/predict-scaling.R")
+fit <- fit_poisson(X, y)
+predict_counts(fit, X)
+predict_counts(fit, X[1, , drop = FALSE])
+```
+
+The problem line is Z \<- scale(newdata)
+
+```{r}
+fit_poisson <- function(X, y, maxit = 50, tol = 1e-8) {
+  Z <- scale(X)
+  
+  # Save training-data scaling parameters
+  center <- attr(Z, "scaled:center")
+  scale_value <- attr(Z, "scaled:scale")
+  
+  Zd <- cbind(1, Z)
+  
+  beta <- rep(0, ncol(Zd))
+  beta[1] <- log(mean(y))
+  
+  for (it in 1:maxit) {
+    mu <- exp(drop(Zd %*% beta))
+    score <- crossprod(Zd, y - mu)
+    info <- crossprod(Zd * mu, Zd)
+    step <- solve(info, score)
+    
+    beta <- beta + drop(step)
+    
+    if (max(abs(step)) < tol) break
+  }
+  
+  list(
+    coefficients = beta,
+    iterations = it,
+    center = center,
+    scale = scale_value
+  )
+}
+
+
+predict_counts <- function(fit, newdata) {
+  # Use the training-data center and scale
+  Z <- scale(
+    newdata,
+    center = fit$center,
+    scale = fit$scale
+  )
+  
+  Zd <- cbind(1, Z)
+  
+  exp(drop(Zd %*% fit$coefficients))
+}
+
+
+set.seed(1)
+
+n <- 400
+
+X <- cbind(
+  x1 = rnorm(n, 50, 10),
+  x2 = rnorm(n, 2, 0.5)
+)
+
+beta_true <- c(-1, 0.9, 0.3)
+
+Z_true <- scale(X)
+
+y <- rpois(
+  n,
+  exp(drop(cbind(1, Z_true) %*% beta_true))
+)
+
+
+# Fit
+fit <- fit_poisson(X, y)
+
+# New clinic
+new_clinic <- X[1, , drop = FALSE]
+
+# Prediction
+prediction <- predict_counts(fit, new_clinic)
+
+prediction
+
+dat <- data.frame(
+  y = y,
+  x1 = X[, 1],
+  x2 = X[, 2]
+)
+# Compare with glm()
+glm_fit <- glm(
+  y ~ x1 + x2,
+  data=dat,
+  family = poisson()
+)
+
+glm_prediction <- predict(
+  glm_fit,
+  newdata = data.frame(
+    x1 = X[1, 1],
+    x2 = X[1, 2]
+  ),
+  type = "response"
+)
+
+prediction
+glm_prediction
+
+
+# Check whether they agree
+all.equal(
+  as.numeric(prediction),
+  as.numeric(glm_prediction),
+  tolerance = 1e-6
+)
+```
